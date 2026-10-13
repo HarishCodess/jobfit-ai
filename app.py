@@ -2,13 +2,13 @@ import os
 import json
 import hashlib
 import html
-import fitz
+import pymupdf
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 
-# set_page_config must be the first Streamlit call (the original called st.error before it).
+# set_page_config must be the first Streamlit call.
 st.set_page_config(
     page_title="JobFit AI – AI Resume & Job Description Matcher",
     page_icon="🎯",
@@ -23,9 +23,20 @@ st.set_page_config(
 
 load_dotenv()
 
-# ======================= ORIGINAL AI LOGIC (unchanged) =======================
-llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0, max_output_tokens=5000)
 
+# Created lazily so a missing API key shows the friendly error instead of crashing at import.
+@st.cache_resource
+def get_llm():
+    key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    return ChatGoogleGenerativeAI(
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.5-flash"),
+        temperature=0,
+        max_output_tokens=5000,
+        google_api_key=key,
+    )
+
+
+# ======================= AI PROMPT =======================
 prompt = PromptTemplate(
     input_variables=["resume", "job_description"],
     template="""
@@ -99,7 +110,7 @@ For the breakdown scores:
 Return ONLY the JSON object.
 """
 )
-# =============================================================================
+# =========================================================
 
 # ------------------------------- THEMES ---------------------------------------
 THEMES = {
@@ -179,6 +190,7 @@ a { color: var(--a1); }
 .stTextArea textarea::placeholder { color: var(--muted) !important; -webkit-text-fill-color: var(--muted) !important; }
 [data-testid="stExpander"] { background: var(--surface); border: 1px solid var(--border) !important; border-radius: 14px; }
 [data-testid="stExpander"] summary * { color: var(--text) !important; }
+.stButton > button { width: 100%; }
 button[kind="primary"], button[data-testid="stBaseButton-primary"] { width: 100%; min-height: 54px; border: none; border-radius: 14px;
   font-size: 17px; font-weight: 700; color: #fff !important; background: linear-gradient(90deg, var(--a1), var(--a2)); }
 button[kind="primary"] *, button[data-testid="stBaseButton-primary"] * { color: #fff !important; }
@@ -267,6 +279,8 @@ def friendly_api_error(e):
         return "The AI service is busy or the free quota has been used up. Please wait a minute and try again."
     if "api key" in msg or "api_key" in msg or "401" in msg or "403" in msg or "permission" in msg:
         return "The AI service rejected the API key. Please check that the Gemini API key is valid."
+    if "404" in msg or "not found" in msg:
+        return "The AI model was not found. Set GEMINI_MODEL to a model your API key supports (for example gemini-2.5-flash)."
     return "The AI service couldn't complete the analysis. Please try again in a moment."
 
 
@@ -288,7 +302,7 @@ def render_header():
     with right:
         dark = st.session_state.theme == "dark"
         st.button("☀️ Light mode" if dark else "🌙 Black mode", on_click=toggle_theme, key="theme_btn",
-                  use_container_width=True, help="Switch between Black and Light theme")
+                  help="Switch between Black and Light theme")
 
 
 def render_hero():
@@ -319,19 +333,19 @@ def render_upload_section():
     st.write("")
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
-        clicked = st.button("Analyze Resume", type="primary", use_container_width=True)
+        clicked = st.button("Analyze Resume", type="primary")
     return resume, jd, clicked
 
 
 def run_analysis(resume, jd):
-    """Original pipeline (PDF text -> prompt -> Gemini -> JSON), with friendlier errors and no repeat calls."""
+    """PDF text -> prompt -> Gemini -> JSON, with friendly errors and no repeat calls."""
     data = resume.getvalue()
     key = hashlib.sha256(data + jd.strip().encode()).hexdigest()
     if st.session_state.get("analysis_key") == key and st.session_state.get("analysis"):
         return  # same inputs: reuse stored result, no extra API call
     with st.spinner("Reading resume and running analysis..."):
         try:
-            doc = fitz.open(stream=data, filetype="pdf")
+            doc = pymupdf.open(stream=data, filetype="pdf")
             resume_text = "".join(page.get_text() for page in doc)
             doc.close()
         except Exception:
@@ -342,7 +356,7 @@ def run_analysis(resume, jd):
             return
         final_prompt = prompt.format(resume=resume_text, job_description=jd)
         try:
-            response = llm.invoke(final_prompt)
+            response = get_llm().invoke(final_prompt)
         except Exception as e:
             st.error(friendly_api_error(e))
             return
